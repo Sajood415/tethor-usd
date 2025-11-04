@@ -1,0 +1,29 @@
+{
+  "name": "tethor-usd",
+  "version": "1.0.0",
+  "description": "Tethor USD (USD.a) ERC20 Token - Production-ready Hardhat project",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "compile": "hardhat compile",
+    "deploy": "hardhat run scripts/deploy.js",
+    "mint": "hardhat run scripts/mint.js",
+    "test": "hardhat test",
+    "node": "hardhat node"
+  },
+  "keywords": [
+    "ethereum",
+    "erc20",
+    "token",
+    "hardhat"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "hardhat": "^2.19.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.0"
+  }
+}
