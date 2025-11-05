@@ -11,20 +11,22 @@ A production-ready ERC20 token contract built with Hardhat and OpenZeppelin. Thi
 - **Standard**: ERC20 with minting and burning capabilities
 - **Total Supply**: Configurable (no cap)
 - **Minting**: Only contract owner (admin) can mint (permanent minting)
-- **Flash Minting**: ✅ Anyone can flash mint tokens within a transaction (must be burned back)
+- **Flash Minting**: ✅ ERC-3156 compliant flash minting (anyone can flash mint tokens within a transaction)
 - **Transferable**: Yes, between any wallets
 - **Wallet Compatible**: Displays correctly in Trust Wallet and other standard wallets
+- **Standards Compliant**: ERC20 + ERC-3156 (Flash Loan standard)
 
 ## Features
 
 - ✅ Standard ERC20 functionality
 - ✅ Owner-only permanent minting
-- ✅ **Flash minting** - Anyone can mint tokens temporarily within a transaction
+- ✅ **ERC-3156 compliant flash minting** - Industry-standard flash loan interface
+- ✅ Interoperable with DeFi protocols (Aave, Uniswap V3, etc.)
 - ✅ `burn()` function for token holders
 - ✅ `burnFrom()` function for approved spending
 - ✅ No supply cap
 - ✅ Optimized for gas efficiency
-- ✅ Production-ready security (OpenZeppelin)
+- ✅ Production-ready security (OpenZeppelin audited contracts)
 
 ## Project Structure
 
@@ -139,16 +141,21 @@ npx hardhat run scripts/mint.js -- 0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb 500
 
 This mints 5,000 USD.a tokens to the specified address.
 
-## Flash Minting
+## Flash Minting (ERC-3156)
 
-TethorUSD supports **flash minting**, allowing anyone to mint tokens temporarily within a single transaction. The tokens must be burned back before the transaction completes, otherwise the entire transaction will revert.
+TethorUSD supports **ERC-3156 compliant flash minting**, allowing anyone to mint tokens temporarily within a single transaction. The tokens must be repaid (burned) before the transaction completes, otherwise the entire transaction will revert.
 
 ### How Flash Minting Works
 
-1. Call `flashMint(amount, data)` to mint tokens to your address
-2. Use the tokens for any purpose (arbitrage, liquidation, etc.) within the same transaction
-3. Burn the flash minted tokens back (via `burn()` or transfer to `address(0)`)
-4. If the tokens aren't fully repaid, the transaction reverts
+1. Call `flashLoan(receiver, token, amount, data)` where:
+   - `receiver` is a contract implementing `IERC3156FlashBorrower`
+   - `token` is `address(this)` (the TethorUSD token address)
+   - `amount` is the amount to flash mint
+   - `data` is optional callback data
+2. The receiver's `onFlashLoan()` callback is invoked with the minted tokens
+3. Use the tokens for any purpose (arbitrage, liquidation, etc.) within the callback
+4. Repay by burning the exact amount (plus any fees) back to the contract
+5. If repayment isn't exact, the entire transaction reverts
 
 ### Use Cases
 
@@ -159,61 +166,89 @@ TethorUSD supports **flash minting**, allowing anyone to mint tokens temporarily
 
 ### Flash Minting Examples
 
-#### From a Contract (Recommended)
+#### From a Contract (ERC-3156 Standard)
 
 ```solidity
-// Your contract must implement IFlashMintReceiver
-contract MyArbitrageBot is IFlashMintReceiver {
+import "@openzeppelin/contracts/interfaces/IERC3156FlashBorrower.sol";
+import "@openzeppelin/contracts/interfaces/IERC3156FlashLender.sol";
+
+// Your contract must implement IERC3156FlashBorrower
+contract MyArbitrageBot is IERC3156FlashBorrower {
     TethorUSD public token;
     
-    function onFlashMint(uint256 amount, bytes calldata data) external override {
+    function onFlashLoan(
+        address initiator,
+        address tokenAddress,
+        uint256 amount,
+        uint256 fee,
+        bytes calldata data
+    ) external override returns (bytes32) {
+        // Verify the callback is from the token contract
+        require(msg.sender == address(token), "Invalid callback");
+        
         // Use the flash minted tokens
         // ... perform arbitrage or other operations ...
         
-        // Repay by burning
-        token.burn(amount);
+        // Repay by transferring tokens back to the contract (amount + fee)
+        // The contract will handle the repayment verification
+        IERC20(tokenAddress).transfer(address(token), amount + fee);
+        
+        // Return the success selector
+        return keccak256("ERC3156FlashBorrower.onFlashLoan");
     }
     
-    function executeFlashMint(uint256 amount) external {
-        token.flashMint(amount, "");
+    function executeFlashLoan(uint256 amount) external {
+        // Call flashLoan with this contract as receiver
+        token.flashLoan(
+            IERC3156FlashBorrower(address(this)),
+            address(token),
+            amount,
+            "" // optional data
+        );
     }
 }
 ```
 
-#### From EOA (External Owned Account)
-
-For simple operations, you can flash mint and burn in the same transaction:
+#### Using ethers.js
 
 ```javascript
-// Using ethers.js
 const token = await ethers.getContractAt("TethorUSD", tokenAddress);
+const receiverContract = await ethers.getContractAt("MyArbitrageBot", receiverAddress);
 
 // Flash mint 1000 tokens
-const tx = await token.flashMint(
+const tx = await token.flashLoan(
+  receiverContract.address,
+  token.address,
   ethers.parseUnits("1000", 18),
-  "0x",
-  {
-    // Your transaction will need to include a callback that burns the tokens
-    // For EOAs, you'll typically need a helper contract
-  }
+  "0x"
 );
+
+await tx.wait();
 ```
 
 ### Important Notes
 
-- **No Fees**: Flash minting is free - you only pay gas
-- **Must Repay**: The full flash minted amount must be burned back
-- **Same Transaction**: All operations must complete in one transaction
-- **Contract Callback**: If calling from a contract, it must implement `IFlashMintReceiver`
-- **Zero Address Transfers**: Transfers to `address(0)` are treated as burns
+- **Flash Loan Cap**: Maximum 1,000,000 USD.a per flash loan transaction
+- **Flash Loan Fee**: 0.01% (1 basis point) fee on flash loan amount
+- **Fee Collection**: Fees are collected by the contract and can be withdrawn by owner
+- **Must Repay Exactly**: The exact flash minted amount (plus fees) must be repaid
+- **Same Transaction**: All operations must complete in one atomic transaction
+- **ERC-3156 Standard**: Uses industry-standard interface for maximum interoperability
+- **Contract Required**: Flash loans must be initiated from a contract implementing `IERC3156FlashBorrower`
+- **ERC20 Compliance**: Transfers to `address(0)` will revert. Use `burn()` or `burnFrom()` to burn tokens.
 
-### Security
+### Security Features
 
-Flash minting is safe because:
-- Tokens cannot be permanently minted without repayment
-- The entire transaction reverts if repayment fails
-- No collateral required - the tokens themselves are the "collateral"
-- Works similar to flash loans but with minting instead of borrowing
+Flash minting is secure because:
+- **OpenZeppelin Audited**: Uses battle-tested OpenZeppelin ERC20FlashMint implementation
+- **ERC-3156 Standard**: Follows industry-standard flash loan interface used by major protocols
+- **Flash Loan Cap**: Limited to 1M USD.a per transaction to prevent extreme supply manipulation
+- **Fee Mechanism**: 0.01% fee discourages abuse and provides protocol revenue
+- **Exact Repayment**: Balance must be exactly restored (plus fees) - no partial repayments allowed
+- **Transaction Atomicity**: The entire transaction reverts if repayment fails
+- **No Collateral Required**: The tokens themselves are the "collateral"
+- **ERC20 Compliant**: Maintains full ERC20 standard compliance for DeFi integration
+- **Owner Events**: All owner mints emit `OwnerMint` events for transparency
 
 ## Contract Verification on Block Explorer
 
@@ -247,12 +282,16 @@ npx hardhat verify --network polygon 0xYourContractAddress
 
 ### Public Functions
 
-- `transfer(to, amount)` - Transfer tokens to another address (or `address(0)` to burn)
+- `transfer(to, amount)` - Transfer tokens to another address (ERC20 compliant - reverts for zero address)
 - `approve(spender, amount)` - Approve another address to spend tokens
-- `transferFrom(from, to, amount)` - Transfer tokens on behalf of another address (or `address(0)` to burn)
+- `transferFrom(from, to, amount)` - Transfer tokens on behalf of another address (ERC20 compliant - reverts for zero address)
 - `burn(amount)` - Burn tokens from your own balance
 - `burnFrom(from, amount)` - Burn tokens from an approved address
-- `flashMint(amount, data)` - Flash mint tokens (must be burned back in same transaction)
+- `flashLoan(receiver, token, amount, data)` - ERC-3156 flash loan (inherited from ERC20FlashMint)
+- `maxFlashLoan(token)` - Returns maximum flash loan amount (1,000,000 USD.a)
+- `flashFee(token, amount)` - Returns flash loan fee (0.01% of amount)
+- `getFlashFeeBalance()` - Returns accumulated flash loan fees in contract
+- `withdrawFlashFees(to)` - Withdraw accumulated fees (owner only)
 
 ### Owner-Only Functions
 
@@ -266,7 +305,6 @@ npx hardhat verify --network polygon 0xYourContractAddress
 - `totalSupply()` - Returns total token supply
 - `balanceOf(address)` - Returns balance of an address
 - `allowance(owner, spender)` - Returns approved spending amount
-- `getFlashMintBalance(address)` - Returns active flash mint amount for an address (usually 0 after completion)
 
 ## Testing (Local Development)
 
@@ -288,8 +326,16 @@ npx hardhat run scripts/deploy.js --network localhost
 - Consider using a multisig wallet for the owner address in production.
 - The contract uses OpenZeppelin's battle-tested implementations for security.
 - No backdoors or hidden functions - fully transparent and auditable code.
-- Flash minting is safe: tokens cannot be permanently minted without repayment.
-- Flash minted tokens must be burned in the same transaction or the transaction reverts.
+- Flash minting is safe: tokens cannot be permanently minted without exact repayment.
+- Flash minted tokens must be repaid exactly (plus fees) in the same transaction or the transaction reverts.
+- Flash loans are capped at 1,000,000 USD.a per transaction to prevent abuse.
+- Flash loan fee is 0.01% (1 basis point) - fees are collected by contract and can be withdrawn by owner.
+- Uses OpenZeppelin's ERC20FlashMint for ERC-3156 compliant flash loans.
+- ERC20 compliant: transfers to zero address revert as per standard.
+- Industry-standard ERC-3156 implementation for maximum DeFi interoperability.
+- Requires OpenZeppelin Contracts v5.0.0 (pinned in package.json).
+- Owner should use a multisig wallet in production for security.
+- All owner mints emit `OwnerMint` events for transparency and off-chain monitoring.
 
 ## License
 
